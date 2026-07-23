@@ -1,0 +1,111 @@
+#define LGFX_USE_V1
+#include <LovyanGFX.hpp>
+
+
+class LGFX : public lgfx::LGFX_Device {
+
+  lgfx::Panel_GC9A01 _panel_instance;
+  lgfx::Bus_SPI _bus_instance;
+
+public:
+
+  LGFX(int cs, int dc, int rst) {
+
+    {
+      auto cfg = _bus_instance.config();
+
+      cfg.spi_host = SPI2_HOST;
+      cfg.freq_write = 40000000;
+      cfg.pin_sclk = 12;
+      cfg.pin_mosi = 11;
+      cfg.pin_miso = -1;
+      cfg.pin_dc = dc;
+
+      _bus_instance.config(cfg);
+      _panel_instance.setBus(&_bus_instance);
+    }
+
+    {
+      auto cfg = _panel_instance.config();
+
+      cfg.pin_cs = cs;
+      cfg.pin_rst = rst;
+      cfg.pin_busy = -1;
+
+      cfg.memory_width = 240;
+      cfg.memory_height = 240;
+      cfg.panel_width = 240;
+      cfg.panel_height = 240;
+
+      cfg.offset_x = 0;
+      cfg.offset_y = 0;
+
+      cfg.invert = true;
+      cfg.rgb_order = false;
+
+      cfg.dlen_16bit = false;
+      cfg.bus_shared = false;
+
+      _panel_instance.config(cfg);
+    }
+
+    setPanel(&_panel_instance);
+  }
+};
+
+
+// Create three displays
+
+LGFX display1(10, 5, 4);
+LGFX display2(9, 6, 7);
+LGFX display3(8, 13, 14);
+
+
+
+void setup() {
+
+  Serial.begin(115200);
+
+
+  display1.init();
+  display2.init();
+  display3.init();
+
+
+  display1.setRotation(0);
+  display2.setRotation(0);
+  display3.setRotation(0);
+
+
+  // Display 1
+  display1.fillScreen(TFT_RED);
+  display1.setTextColor(TFT_WHITE);
+  display1.setTextSize(3);
+  display1.setCursor(80,110);
+  display1.print("ONE");
+
+
+  // Display 2
+  display2.fillScreen(TFT_GREEN);
+  display2.setTextColor(TFT_WHITE);
+  display2.setTextSize(3);
+  display2.setCursor(65,110);
+  display2.print("TWO");
+
+
+  // Display 3
+  display3.fillScreen(TFT_BLUE);
+  display3.setTextColor(TFT_WHITE);
+  display3.setTextSize(3);
+  display3.setCursor(65,110);
+  display3.print("THREE");
+
+
+  Serial.println("Three displays initialized");
+
+}
+
+
+void loop() {
+
+}
