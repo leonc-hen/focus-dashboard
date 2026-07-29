@@ -1,0 +1,42 @@
+#define BUTTON_PIN 15
+
+bool buttonState = HIGH;
+bool lastReading = HIGH;
+
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 50;
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  Serial.println("Button debounce test started");
+}
+
+void loop() {
+
+  bool reading = digitalRead(BUTTON_PIN);
+
+  // Has the raw button reading changed?
+  if (reading != lastReading) {
+    lastDebounceTime = millis();
+  }
+
+  // Has it stayed unchanged long enough?
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+
+    // Has the confirmed button state changed?
+    if (reading != buttonState) {
+
+      buttonState = reading;
+
+      // LOW means the button was pressed
+      if (buttonState == LOW) {
+        Serial.println("BUTTON PRESSED");
+      }
+    }
+  }
+
+  lastReading = reading;
+}
