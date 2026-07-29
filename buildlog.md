@@ -86,3 +86,25 @@ All three displays initialized and displayed independent graphics.
 - Labeling power connections prevents wiring mistakes.
 
 <img width="2880" height="2160" alt="IMG_4620" src="https://github.com/user-attachments/assets/1f2607db-7ab3-42a0-83b9-dadbb0a201e2" />
+
+2026-07-26
+# Milestone 2 : Button Test
+Hardware:
+- 4-pin tactile push button
+- GPIO15
+- GND
+
+Software:
+- INPUT_PULLUP
+- Falling-edge press detection
+- 50 ms debounce
+- millis()-based timing
+
+Test:
+- Button released → HIGH
+- Button pressed → LOW
+- One message per physical press
+- Holding button does not repeatedly trigger events
+
+Result:
+PASS
