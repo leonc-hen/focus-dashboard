@@ -108,3 +108,55 @@ Test:
 
 Result:
 PASS
+
+# Milestone 3.1: RTC Communication
+Software
+
+Libraries:
+
+Wire
+RTClib by Adafruit
+Test
+
+ESP32 successfully detected RTC.
+
+Initial RTC state:
+
+2000-1-1 02:00:00
+
+This indicated communication worked, but time had not been configured.
+
+# Milestone 3.2: RTC Time Setting
+
+Used:
+
+rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+
+RTC successfully updated.
+
+Verified:
+
+Seconds increasing
+Correct date/time
+Clock continues running
+
+# Milestone 3.3: RTC Power Loss Test
+Test
+Set RTC time
+Remove ESP32 USB power
+Wait several minutes
+Reconnect
+
+Result:
+
+RTC continued counting.
+
+Observed:
+
+Approximately 30 second offset
+Determined to be caused by compile/upload delay when setting time
+Result
+
+✅ PASS
+
+DS3231 backup battery operation confirmed.
