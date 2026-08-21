@@ -1,0 +1,528 @@
+#define LGFX_USE_V1
+
+#include <LovyanGFX.hpp>
+#include <Wire.h>
+#include <RTClib.h>
+
+// ============================================================
+// TFT DISPLAY CLASS
+// ============================================================
+
+class LGFX : public lgfx::LGFX_Device {
+
+  lgfx::Panel_GC9A01 _panel_instance;
+  lgfx::Bus_SPI _bus_instance;
+
+public:
+
+  LGFX(int8_t cs, int8_t dc, int8_t rst) {
+
+    // SPI BUS
+    {
+      auto cfg = _bus_instance.config();
+
+      cfg.spi_host = SPI2_HOST;
+      cfg.freq_write = 40000000;
+
+      cfg.pin_sclk = 12;
+      cfg.pin_mosi = 11;
+      cfg.pin_miso = -1;
+
+      cfg.pin_dc = dc;
+
+      _bus_instance.config(cfg);
+      _panel_instance.setBus(&_bus_instance);
+    }
+
+    // GC9A01 PANEL
+    {
+      auto cfg = _panel_instance.config();
+
+      cfg.pin_cs = cs;
+      cfg.pin_rst = rst;
+      cfg.pin_busy = -1;
+
+      cfg.memory_width = 240;
+      cfg.memory_height = 240;
+
+      cfg.panel_width = 240;
+      cfg.panel_height = 240;
+
+      cfg.offset_x = 0;
+      cfg.offset_y = 0;
+
+      cfg.invert = true;
+      cfg.rgb_order = false;
+      cfg.dlen_16bit = false;
+
+      cfg.bus_shared = true;
+
+      _panel_instance.config(cfg);
+    }
+
+    setPanel(&_panel_instance);
+  }
+};
+
+
+// ============================================================
+// THREE DISPLAYS
+// ============================================================
+
+LGFX display1(10, 5, 4);
+LGFX display2(9, 6, 7);
+LGFX display3(8, 13, 14);
+
+
+// ============================================================
+// RTC
+// ============================================================
+
+RTC_DS3231 rtc;
+
+
+// ============================================================
+// BUTTONS
+// ============================================================
+
+const int BUTTON_NEXT  = 15;
+const int BUTTON_BACK  = 16;
+const int BUTTON_START = 35;
+const int BUTTON_RESET = 36;
+
+
+// ============================================================
+// PROGRAM VARIABLES
+// ============================================================
+
+int mode = 0;
+
+bool timerRunning = false;
+
+unsigned long timerStartMillis = 0;
+unsigned long elapsedSeconds = 0;
+
+
+// ============================================================
+// BUTTON DEBOUNCE
+// ============================================================
+
+unsigned long lastButtonTime = 0;
+
+const unsigned long debounceDelay = 200;
+
+
+// ============================================================
+// DISPLAY UPDATE
+// ============================================================
+
+unsigned long lastDisplayUpdate = 0;
+
+const unsigned long displayUpdateInterval = 500;
+
+
+// ============================================================
+// CENTER TEXT FUNCTION
+// ============================================================
+
+void centerText(
+  LGFX &display,
+  const char* text,
+  int y,
+  int textSize
+) {
+
+  display.setTextSize(textSize);
+
+  int textWidth = display.textWidth(text);
+
+  int x = (240 - textWidth) / 2;
+
+  display.setCursor(x, y);
+
+  display.print(text);
+}
+
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+
+  // ----------------------------------------------------------
+  // BUTTONS
+  // ----------------------------------------------------------
+
+  pinMode(BUTTON_NEXT, INPUT_PULLUP);
+  pinMode(BUTTON_BACK, INPUT_PULLUP);
+  pinMode(BUTTON_START, INPUT_PULLUP);
+  pinMode(BUTTON_RESET, INPUT_PULLUP);
+
+
+  // ----------------------------------------------------------
+  // RTC
+  // ----------------------------------------------------------
+
+  Wire.begin(17, 18);
+
+  if (!rtc.begin()) {
+
+    Serial.println("RTC NOT FOUND");
+
+  } else {
+
+    Serial.println("RTC OK");
+
+    // Only set RTC if it has actually lost power.
+    if (rtc.lostPower()) {
+
+      Serial.println("RTC lost power.");
+      Serial.println("Setting RTC to compile time.");
+
+      rtc.adjust(
+        DateTime(F(__DATE__), F(__TIME__))
+      );
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 1
+  // ----------------------------------------------------------
+
+  display1.init();
+  display1.setRotation(0);
+  display1.fillScreen(TFT_BLACK);
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 2
+  // ----------------------------------------------------------
+
+  display2.init();
+  display2.setRotation(0);
+  display2.fillScreen(TFT_BLACK);
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 3
+  // ----------------------------------------------------------
+
+  display3.init();
+  display3.setRotation(0);
+  display3.fillScreen(TFT_BLACK);
+
+
+  // ----------------------------------------------------------
+  // INITIAL DISPLAY
+  // ----------------------------------------------------------
+
+  drawDisplays();
+
+  Serial.println("SYSTEM READY");
+}
+
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+
+void loop() {
+
+  checkButtons();
+
+  updateTimer();
+
+
+  if (
+    millis() - lastDisplayUpdate
+    >= displayUpdateInterval
+  ) {
+
+    lastDisplayUpdate = millis();
+
+    drawDisplays();
+  }
+}
+
+
+// ============================================================
+// BUTTON HANDLING
+// ============================================================
+
+void checkButtons() {
+
+  if (millis() - lastButtonTime < debounceDelay) {
+    return;
+  }
+
+
+  // BUTTON 1 - NEXT
+  if (digitalRead(BUTTON_NEXT) == LOW) {
+
+    mode++;
+
+    if (mode > 2) {
+      mode = 0;
+    }
+
+    Serial.print("Mode: ");
+    Serial.println(mode + 1);
+
+    lastButtonTime = millis();
+  }
+
+
+  // BUTTON 2 - BACK
+  else if (digitalRead(BUTTON_BACK) == LOW) {
+
+    mode--;
+
+    if (mode < 0) {
+      mode = 2;
+    }
+
+    Serial.print("Mode: ");
+    Serial.println(mode + 1);
+
+    lastButtonTime = millis();
+  }
+
+
+  // BUTTON 3 - START / STOP
+  else if (digitalRead(BUTTON_START) == LOW) {
+
+    if (!timerRunning) {
+
+      timerRunning = true;
+
+      timerStartMillis =
+        millis() - (elapsedSeconds * 1000);
+
+      Serial.println("TIMER STARTED");
+
+    } else {
+
+      timerRunning = false;
+
+      Serial.println("TIMER STOPPED");
+    }
+
+    lastButtonTime = millis();
+  }
+
+
+  // BUTTON 4 - RESET
+  else if (digitalRead(BUTTON_RESET) == LOW) {
+
+    timerRunning = false;
+
+    elapsedSeconds = 0;
+
+    Serial.println("TIMER RESET");
+
+    lastButtonTime = millis();
+  }
+}
+
+
+// ============================================================
+// TIMER
+// ============================================================
+
+void updateTimer() {
+
+  if (timerRunning) {
+
+    elapsedSeconds =
+      (millis() - timerStartMillis) / 1000;
+  }
+}
+
+
+// ============================================================
+// DRAW ALL DISPLAYS
+// ============================================================
+
+void drawDisplays() {
+
+  DateTime now = rtc.now();
+
+
+  // ==========================================================
+  // DISPLAY 1 - CLOCK
+  // ==========================================================
+
+  display1.fillScreen(TFT_BLACK);
+
+  display1.setTextColor(TFT_WHITE);
+
+  centerText(
+    display1,
+    "TIME",
+    40,
+    2
+  );
+
+
+  char timeString[9];
+
+  sprintf(
+    timeString,
+    "%02d:%02d:%02d",
+    now.hour(),
+    now.minute(),
+    now.second()
+  );
+
+
+  centerText(
+    display1,
+    timeString,
+    100,
+    3
+  );
+
+
+  centerText(
+    display1,
+    "STUDY HELPER",
+    165,
+    1
+  );
+
+
+  // ==========================================================
+  // DISPLAY 2 - DATE
+  // ==========================================================
+
+  display2.fillScreen(TFT_BLACK);
+
+  display2.setTextColor(TFT_WHITE);
+
+  centerText(
+    display2,
+    "DATE",
+    40,
+    2
+  );
+
+
+  char dateString[11];
+
+  sprintf(
+    dateString,
+    "%04d-%02d-%02d",
+    now.year(),
+    now.month(),
+    now.day()
+  );
+
+
+  centerText(
+    display2,
+    dateString,
+    100,
+    2
+  );
+
+
+  centerText(
+    display2,
+    "DS3231 RTC",
+    160,
+    1
+  );
+
+
+  // ==========================================================
+  // DISPLAY 3 - STUDY TIMER
+  // ==========================================================
+
+  display3.fillScreen(TFT_BLACK);
+
+  display3.setTextColor(TFT_WHITE);
+
+  centerText(
+    display3,
+    "STUDY",
+    30,
+    2
+  );
+
+
+  // TIMER FORMAT
+
+  unsigned long hours =
+    elapsedSeconds / 3600;
+
+  unsigned long minutes =
+    (elapsedSeconds % 3600) / 60;
+
+  unsigned long seconds =
+    elapsedSeconds % 60;
+
+
+  char timerString[12];
+
+  sprintf(
+    timerString,
+    "%02lu:%02lu:%02lu",
+    hours,
+    minutes,
+    seconds
+  );
+
+
+  centerText(
+    display3,
+    timerString,
+    90,
+    3
+  );
+
+
+  // TIMER STATUS
+
+  if (timerRunning) {
+
+    centerText(
+      display3,
+      "RUNNING",
+      145,
+      1
+    );
+
+  } else {
+
+    centerText(
+      display3,
+      "PAUSED",
+      145,
+      1
+    );
+  }
+
+
+  // MODE
+
+  char modeString[10];
+
+  sprintf(
+    modeString,
+    "MODE %d",
+    mode + 1
+  );
+
+
+  centerText(
+    display3,
+    modeString,
+    175,
+    1
+  );
+}
