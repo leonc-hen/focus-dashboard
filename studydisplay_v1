@@ -5,68 +5,64 @@
 #include <RTClib.h>
 
 // ============================================================
-// TFT DISPLAY CLASS
+// DISPLAY CLASS
 // ============================================================
 
 class LGFX : public lgfx::LGFX_Device {
 
-  lgfx::Panel_GC9A01 _panel_instance;
-  lgfx::Bus_SPI _bus_instance;
+  lgfx::Panel_GC9A01 panel;
+  lgfx::Bus_SPI bus;
 
 public:
 
   LGFX(int8_t cs, int8_t dc, int8_t rst) {
 
-    // --------------------------------------------------------
+    // ----------------------------
     // SPI BUS
-    // --------------------------------------------------------
+    // ----------------------------
 
-    {
-      auto cfg = _bus_instance.config();
+    auto busConfig = bus.config();
 
-      cfg.spi_host = SPI2_HOST;
-      cfg.freq_write = 40000000;
+    busConfig.spi_host = SPI2_HOST;
+    busConfig.freq_write = 40000000;
 
-      cfg.pin_sclk = 12;
-      cfg.pin_mosi = 11;
-      cfg.pin_miso = -1;
+    busConfig.pin_sclk = 12;
+    busConfig.pin_mosi = 11;
+    busConfig.pin_miso = -1;
+    busConfig.pin_dc = dc;
 
-      cfg.pin_dc = dc;
+    bus.config(busConfig);
+    panel.setBus(&bus);
 
-      _bus_instance.config(cfg);
-      _panel_instance.setBus(&_bus_instance);
-    }
 
-    // --------------------------------------------------------
-    // GC9A01 PANEL
-    // --------------------------------------------------------
+    // ----------------------------
+    // DISPLAY PANEL
+    // ----------------------------
 
-    {
-      auto cfg = _panel_instance.config();
+    auto panelConfig = panel.config();
 
-      cfg.pin_cs = cs;
-      cfg.pin_rst = rst;
-      cfg.pin_busy = -1;
+    panelConfig.pin_cs = cs;
+    panelConfig.pin_rst = rst;
+    panelConfig.pin_busy = -1;
 
-      cfg.memory_width = 240;
-      cfg.memory_height = 240;
+    panelConfig.memory_width = 240;
+    panelConfig.memory_height = 240;
 
-      cfg.panel_width = 240;
-      cfg.panel_height = 240;
+    panelConfig.panel_width = 240;
+    panelConfig.panel_height = 240;
 
-      cfg.offset_x = 0;
-      cfg.offset_y = 0;
+    panelConfig.offset_x = 0;
+    panelConfig.offset_y = 0;
 
-      cfg.invert = true;
-      cfg.rgb_order = false;
-      cfg.dlen_16bit = false;
+    panelConfig.invert = true;
+    panelConfig.rgb_order = false;
+    panelConfig.dlen_16bit = false;
 
-      cfg.bus_shared = true;
+    panelConfig.bus_shared = true;
 
-      _panel_instance.config(cfg);
-    }
+    panel.config(panelConfig);
 
-    setPanel(&_panel_instance);
+    setPanel(&panel);
   }
 };
 
@@ -101,23 +97,87 @@ const int BUTTON_BACK     = 2;
 // BUTTON DEBOUNCE
 // ============================================================
 
-const unsigned long DEBOUNCE_TIME = 40;
+const unsigned long DEBOUNCE_MS = 50;
 
 
 // ============================================================
-// BUTTON STRUCTURE
+// BUTTON CLASS
 // ============================================================
 
-struct Button {
+class DebouncedButton {
+
+private:
 
   int pin;
 
-  bool stableState;
+  bool currentState;
   bool lastReading;
 
   unsigned long lastChangeTime;
 
-  bool pressedEvent;
+public:
+
+  DebouncedButton(int gpio) {
+
+    pin = gpio;
+
+    currentState = HIGH;
+    lastReading = HIGH;
+
+    lastChangeTime = 0;
+  }
+
+
+  void begin() {
+
+    pinMode(pin, INPUT_PULLUP);
+
+    currentState = digitalRead(pin);
+    lastReading = currentState;
+
+    lastChangeTime = millis();
+  }
+
+
+  bool pressed() {
+
+    bool reading = digitalRead(pin);
+
+
+    // --------------------------------
+    // Raw signal changed
+    // --------------------------------
+
+    if (reading != lastReading) {
+
+      lastReading = reading;
+
+      lastChangeTime = millis();
+    }
+
+
+    // --------------------------------
+    // Wait until stable
+    // --------------------------------
+
+    if (
+      millis() - lastChangeTime >= DEBOUNCE_MS &&
+      reading != currentState
+    ) {
+
+      currentState = reading;
+
+
+      // LOW means button was pressed
+
+      if (currentState == LOW) {
+
+        return true;
+      }
+    }
+
+    return false;
+  }
 };
 
 
@@ -125,44 +185,17 @@ struct Button {
 // BUTTON OBJECTS
 // ============================================================
 
-Button previousButton = {
-  BUTTON_PREVIOUS,
-  HIGH,
-  HIGH,
-  0,
-  false
-};
-
-Button nextButton = {
-  BUTTON_NEXT,
-  HIGH,
-  HIGH,
-  0,
-  false
-};
-
-Button selectButton = {
-  BUTTON_SELECT,
-  HIGH,
-  HIGH,
-  0,
-  false
-};
-
-Button backButton = {
-  BUTTON_BACK,
-  HIGH,
-  HIGH,
-  0,
-  false
-};
+DebouncedButton buttonPrevious(BUTTON_PREVIOUS);
+DebouncedButton buttonNext(BUTTON_NEXT);
+DebouncedButton buttonSelect(BUTTON_SELECT);
+DebouncedButton buttonBack(BUTTON_BACK);
 
 
 // ============================================================
 // SCREEN STATES
 // ============================================================
 
-enum ScreenState {
+enum Screen {
 
   HOME,
   TASKS,
@@ -170,14 +203,7 @@ enum ScreenState {
   SETTINGS
 };
 
-ScreenState currentScreen = HOME;
-
-
-// ============================================================
-// DISPLAY REDRAW
-// ============================================================
-
-bool interfaceNeedsRedraw = true;
+Screen currentScreen = HOME;
 
 
 // ============================================================
@@ -189,13 +215,14 @@ bool timerRunning = false;
 unsigned long timerStartMillis = 0;
 unsigned long elapsedSeconds = 0;
 
+unsigned long lastTimerDisplay = 0;
+
 
 // ============================================================
-// UPDATE TIMERS
+// CLOCK
 // ============================================================
 
-unsigned long lastClockUpdate = 0;
-unsigned long lastTimerUpdate = 0;
+unsigned long lastClockDisplay = 0;
 
 
 // ============================================================
@@ -204,101 +231,20 @@ unsigned long lastTimerUpdate = 0;
 
 void centerText(
   LGFX &display,
-  const char* text,
+  const char *text,
   int y,
-  int textSize
+  int size
 ) {
 
-  display.setTextSize(textSize);
+  display.setTextSize(size);
 
-  int textWidth = display.textWidth(text);
+  int width = display.textWidth(text);
 
-  int x = (240 - textWidth) / 2;
+  int x = (240 - width) / 2;
 
   display.setCursor(x, y);
 
   display.print(text);
-}
-
-
-// ============================================================
-// INITIALIZE BUTTON
-// ============================================================
-
-void initializeButton(Button &button) {
-
-  pinMode(button.pin, INPUT_PULLUP);
-
-  bool state = digitalRead(button.pin);
-
-  button.stableState = state;
-  button.lastReading = state;
-
-  button.lastChangeTime = millis();
-
-  button.pressedEvent = false;
-}
-
-
-// ============================================================
-// UPDATE BUTTON
-// ============================================================
-
-void updateButton(Button &button) {
-
-  bool reading = digitalRead(button.pin);
-
-
-  // ----------------------------------------------------------
-  // Detect change
-  // ----------------------------------------------------------
-
-  if (reading != button.lastReading) {
-
-    button.lastChangeTime = millis();
-
-    button.lastReading = reading;
-  }
-
-
-  // ----------------------------------------------------------
-  // Check whether signal has remained stable
-  // ----------------------------------------------------------
-
-  if (
-    millis() - button.lastChangeTime >= DEBOUNCE_TIME
-  ) {
-
-    if (reading != button.stableState) {
-
-      button.stableState = reading;
-
-
-      // LOW = pressed
-
-      if (button.stableState == LOW) {
-
-        button.pressedEvent = true;
-      }
-    }
-  }
-}
-
-
-// ============================================================
-// CHECK BUTTON PRESS
-// ============================================================
-
-bool wasPressed(Button &button) {
-
-  if (button.pressedEvent) {
-
-    button.pressedEvent = false;
-
-    return true;
-  }
-
-  return false;
 }
 
 
@@ -310,20 +256,22 @@ void setup() {
 
   Serial.begin(115200);
 
+  delay(200);
 
-  // ----------------------------------------------------------
+
+  // ==========================================================
   // BUTTONS
-  // ----------------------------------------------------------
+  // ==========================================================
 
-  initializeButton(previousButton);
-  initializeButton(nextButton);
-  initializeButton(selectButton);
-  initializeButton(backButton);
+  buttonPrevious.begin();
+  buttonNext.begin();
+  buttonSelect.begin();
+  buttonBack.begin();
 
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // RTC
-  // ----------------------------------------------------------
+  // ==========================================================
 
   Wire.begin(17, 18);
 
@@ -333,11 +281,11 @@ void setup() {
 
   } else {
 
-    Serial.println("RTC OK");
+    Serial.println("RTC CONNECTED");
 
     if (rtc.lostPower()) {
 
-      Serial.println("RTC lost power.");
+      Serial.println("RTC LOST POWER");
 
       rtc.adjust(
         DateTime(F(__DATE__), F(__TIME__))
@@ -346,163 +294,127 @@ void setup() {
   }
 
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // DISPLAY 1
-  // ----------------------------------------------------------
+  // ==========================================================
 
   display1.init();
   display1.setRotation(0);
   display1.fillScreen(TFT_BLACK);
 
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // DISPLAY 2
-  // ----------------------------------------------------------
+  // ==========================================================
 
   display2.init();
   display2.setRotation(0);
   display2.fillScreen(TFT_BLACK);
 
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // DISPLAY 3
-  // ----------------------------------------------------------
+  // ==========================================================
 
   display3.init();
   display3.setRotation(0);
   display3.fillScreen(TFT_BLACK);
 
 
-  // ----------------------------------------------------------
-  // INITIAL INTERFACE
-  // ----------------------------------------------------------
+  // ==========================================================
+  // DRAW HOME
+  // ==========================================================
 
-  drawInterface();
-
-  interfaceNeedsRedraw = false;
-
-  lastClockUpdate = millis();
-  lastTimerUpdate = millis();
+  drawHome();
 
 
   Serial.println();
   Serial.println("==============================");
   Serial.println("STUDY HELPER READY");
   Serial.println("==============================");
+  Serial.println("Button 1 = Previous");
+  Serial.println("Button 2 = Next");
+  Serial.println("Button 3 = Select");
+  Serial.println("Button 4 = Back");
 }
 
 
 // ============================================================
-// MAIN LOOP
+// LOOP
 // ============================================================
 
 void loop() {
 
-  // ----------------------------------------------------------
-  // UPDATE BUTTONS
-  // ----------------------------------------------------------
+  // ==========================================================
+  // BUTTONS
+  // ==========================================================
 
-  updateButton(previousButton);
-  updateButton(nextButton);
-  updateButton(selectButton);
-  updateButton(backButton);
+  if (buttonPrevious.pressed()) {
 
+    Serial.println("BUTTON 1: PREVIOUS");
 
-  // ----------------------------------------------------------
-  // HANDLE BUTTONS
-  // ----------------------------------------------------------
-
-  handleButtons();
+    goPrevious();
+  }
 
 
-  // ----------------------------------------------------------
-  // UPDATE TIMER
-  // ----------------------------------------------------------
+  if (buttonNext.pressed()) {
+
+    Serial.println("BUTTON 2: NEXT");
+
+    goNext();
+  }
+
+
+  if (buttonSelect.pressed()) {
+
+    Serial.println("BUTTON 3: SELECT");
+
+    selectAction();
+  }
+
+
+  if (buttonBack.pressed()) {
+
+    Serial.println("BUTTON 4: BACK");
+
+    backAction();
+  }
+
+
+  // ==========================================================
+  // TIMER
+  // ==========================================================
 
   updateTimer();
 
 
-  // ----------------------------------------------------------
-  // FULL REDRAW WHEN SCREEN CHANGES
-  // ----------------------------------------------------------
-
-  if (interfaceNeedsRedraw) {
-
-    drawInterface();
-
-    interfaceNeedsRedraw = false;
-
-    lastClockUpdate = millis();
-    lastTimerUpdate = millis();
-  }
-
-
-  // ----------------------------------------------------------
-  // UPDATE CLOCK
-  // ----------------------------------------------------------
+  // ==========================================================
+  // CLOCK
+  // ==========================================================
 
   if (
     currentScreen == HOME &&
-    millis() - lastClockUpdate >= 1000
+    millis() - lastClockDisplay >= 1000
   ) {
 
-    lastClockUpdate = millis();
+    lastClockDisplay = millis();
 
-    updateHomeClock();
+    updateHomeTime();
   }
 
 
-  // ----------------------------------------------------------
-  // UPDATE TIMER
-  // ----------------------------------------------------------
+  // ==========================================================
+  // TIMER DISPLAY
+  // ==========================================================
 
   if (
     currentScreen == TIMER &&
-    millis() - lastTimerUpdate >= 1000
+    millis() - lastTimerDisplay >= 1000
   ) {
 
-    lastTimerUpdate = millis();
+    lastTimerDisplay = millis();
 
     updateTimerDisplay();
-  }
-}
-
-
-// ============================================================
-// HANDLE BUTTONS
-// ============================================================
-
-void handleButtons() {
-
-  if (wasPressed(previousButton)) {
-
-    previousScreen();
-
-    Serial.println("Button 1 -> PREVIOUS");
-  }
-
-
-  if (wasPressed(nextButton)) {
-
-    nextScreen();
-
-    Serial.println("Button 2 -> NEXT");
-  }
-
-
-  if (wasPressed(selectButton)) {
-
-    selectCurrentScreen();
-
-    Serial.println("Button 3 -> SELECT");
-  }
-
-
-  if (wasPressed(backButton)) {
-
-    backAction();
-
-    Serial.println("Button 4 -> BACK");
   }
 }
 
@@ -511,28 +423,45 @@ void handleButtons() {
 // NEXT SCREEN
 // ============================================================
 
-void nextScreen() {
+void goNext() {
 
   switch (currentScreen) {
 
     case HOME:
+
       currentScreen = TASKS;
+
+      drawTasks();
+
       break;
+
 
     case TASKS:
+
       currentScreen = TIMER;
+
+      drawTimer();
+
       break;
+
 
     case TIMER:
+
       currentScreen = SETTINGS;
+
+      drawSettings();
+
       break;
+
 
     case SETTINGS:
+
       currentScreen = HOME;
+
+      drawHome();
+
       break;
   }
-
-  interfaceNeedsRedraw = true;
 }
 
 
@@ -540,38 +469,59 @@ void nextScreen() {
 // PREVIOUS SCREEN
 // ============================================================
 
-void previousScreen() {
+void goPrevious() {
 
   switch (currentScreen) {
 
     case HOME:
+
       currentScreen = SETTINGS;
+
+      drawSettings();
+
       break;
+
 
     case TASKS:
+
       currentScreen = HOME;
+
+      drawHome();
+
       break;
+
 
     case TIMER:
+
       currentScreen = TASKS;
+
+      drawTasks();
+
       break;
+
 
     case SETTINGS:
+
       currentScreen = TIMER;
+
+      drawTimer();
+
       break;
   }
-
-  interfaceNeedsRedraw = true;
 }
 
 
 // ============================================================
-// SELECT
+// SELECT ACTION
 // ============================================================
 
-void selectCurrentScreen() {
+void selectAction() {
 
   switch (currentScreen) {
+
+    // --------------------------------------------------------
+    // HOME
+    // --------------------------------------------------------
 
     case HOME:
 
@@ -580,35 +530,58 @@ void selectCurrentScreen() {
       break;
 
 
+    // --------------------------------------------------------
+    // TASKS
+    // --------------------------------------------------------
+
     case TASKS:
 
       Serial.println("Task selected");
 
+      currentScreen = TIMER;
+
+      drawTimer();
+
       break;
 
 
+    // --------------------------------------------------------
+    // TIMER
+    // --------------------------------------------------------
+
     case TIMER:
 
-      if (!timerRunning) {
+      if (timerRunning) {
 
-        timerRunning = true;
+        // Pause
+
+        timerRunning = false;
+
+        elapsedSeconds =
+          (millis() - timerStartMillis) / 1000;
+
+        Serial.println("TIMER PAUSED");
+
+      } else {
+
+        // Start / resume
 
         timerStartMillis =
           millis() - (elapsedSeconds * 1000);
 
-        Serial.println("Timer STARTED");
+        timerRunning = true;
 
-      } else {
-
-        timerRunning = false;
-
-        Serial.println("Timer PAUSED");
+        Serial.println("TIMER STARTED");
       }
 
-      updateTimerDisplay();
+      drawTimer();
 
       break;
 
+
+    // --------------------------------------------------------
+    // SETTINGS
+    // --------------------------------------------------------
 
     case SETTINGS:
 
@@ -620,26 +593,38 @@ void selectCurrentScreen() {
 
 
 // ============================================================
-// BACK
+// BACK ACTION
 // ============================================================
 
 void backAction() {
 
   switch (currentScreen) {
 
+    // --------------------------------------------------------
+    // HOME
+    // --------------------------------------------------------
+
     case HOME:
 
       break;
 
 
+    // --------------------------------------------------------
+    // TASKS
+    // --------------------------------------------------------
+
     case TASKS:
 
       currentScreen = HOME;
 
-      interfaceNeedsRedraw = true;
+      drawHome();
 
       break;
 
+
+    // --------------------------------------------------------
+    // TIMER
+    // --------------------------------------------------------
 
     case TIMER:
 
@@ -647,18 +632,22 @@ void backAction() {
 
       elapsedSeconds = 0;
 
-      Serial.println("Timer RESET");
+      Serial.println("TIMER RESET");
 
-      updateTimerDisplay();
+      drawTimer();
 
       break;
 
+
+    // --------------------------------------------------------
+    // SETTINGS
+    // --------------------------------------------------------
 
     case SETTINGS:
 
       currentScreen = HOME;
 
-      interfaceNeedsRedraw = true;
+      drawHome();
 
       break;
   }
@@ -666,48 +655,24 @@ void backAction() {
 
 
 // ============================================================
-// TIMER LOGIC
+// TIMER UPDATE
 // ============================================================
 
 void updateTimer() {
 
-  if (timerRunning) {
+  if (!timerRunning) {
 
-    elapsedSeconds =
-      (millis() - timerStartMillis) / 1000;
+    return;
   }
+
+
+  elapsedSeconds =
+    (millis() - timerStartMillis) / 1000;
 }
 
 
 // ============================================================
-// DRAW INTERFACE
-// ============================================================
-
-void drawInterface() {
-
-  switch (currentScreen) {
-
-    case HOME:
-      drawHome();
-      break;
-
-    case TASKS:
-      drawTasks();
-      break;
-
-    case TIMER:
-      drawTimer();
-      break;
-
-    case SETTINGS:
-      drawSettings();
-      break;
-  }
-}
-
-
-// ============================================================
-// HOME
+// HOME SCREEN
 // ============================================================
 
 void drawHome() {
@@ -715,9 +680,12 @@ void drawHome() {
   DateTime now = rtc.now();
 
 
+  // ----------------------------------------------------------
   // DISPLAY 1
+  // ----------------------------------------------------------
 
   display1.fillScreen(TFT_BLACK);
+
   display1.setTextColor(TFT_WHITE);
 
   centerText(
@@ -728,10 +696,10 @@ void drawHome() {
   );
 
 
-  char timeString[9];
+  char timeText[9];
 
   sprintf(
-    timeString,
+    timeText,
     "%02d:%02d:%02d",
     now.hour(),
     now.minute(),
@@ -741,7 +709,7 @@ void drawHome() {
 
   centerText(
     display1,
-    timeString,
+    timeText,
     95,
     3
   );
@@ -750,14 +718,17 @@ void drawHome() {
   centerText(
     display1,
     "HOME",
-    175,
+    180,
     1
   );
 
 
+  // ----------------------------------------------------------
   // DISPLAY 2
+  // ----------------------------------------------------------
 
   display2.fillScreen(TFT_BLACK);
+
   display2.setTextColor(TFT_WHITE);
 
   centerText(
@@ -768,10 +739,10 @@ void drawHome() {
   );
 
 
-  char dateString[11];
+  char dateText[11];
 
   sprintf(
-    dateString,
+    dateText,
     "%04d-%02d-%02d",
     now.year(),
     now.month(),
@@ -781,7 +752,7 @@ void drawHome() {
 
   centerText(
     display2,
-    dateString,
+    dateText,
     95,
     2
   );
@@ -795,9 +766,12 @@ void drawHome() {
   );
 
 
+  // ----------------------------------------------------------
   // DISPLAY 3
+  // ----------------------------------------------------------
 
   display3.fillScreen(TFT_BLACK);
+
   display3.setTextColor(TFT_WHITE);
 
   centerText(
@@ -824,17 +798,29 @@ void drawHome() {
 
 
 // ============================================================
-// UPDATE HOME CLOCK
+// HOME CLOCK UPDATE
 // ============================================================
 
-void updateHomeClock() {
+void updateHomeTime() {
 
   DateTime now = rtc.now();
 
-  char timeString[9];
+
+  // Only clear the time area
+
+  display1.fillRect(
+    0,
+    85,
+    240,
+    60,
+    TFT_BLACK
+  );
+
+
+  char timeText[9];
 
   sprintf(
-    timeString,
+    timeText,
     "%02d:%02d:%02d",
     now.hour(),
     now.minute(),
@@ -842,20 +828,11 @@ void updateHomeClock() {
   );
 
 
-  display1.fillRect(
-    0,
-    90,
-    240,
-    45,
-    TFT_BLACK
-  );
-
-
   display1.setTextColor(TFT_WHITE);
 
   centerText(
     display1,
-    timeString,
+    timeText,
     95,
     3
   );
@@ -863,7 +840,7 @@ void updateHomeClock() {
 
 
 // ============================================================
-// TASKS
+// TASK SCREEN
 // ============================================================
 
 void drawTasks() {
@@ -888,9 +865,9 @@ void drawTasks() {
 
   centerText(
     display1,
-    "NEXT",
-    95,
-    2
+    "PHYSICS",
+    90,
+    3
   );
 
   centerText(
@@ -905,23 +882,23 @@ void drawTasks() {
 
   centerText(
     display2,
-    "PHYSICS",
-    50,
+    "STUDY",
+    45,
     2
   );
 
   centerText(
     display2,
-    "STUDY",
+    "45 MIN",
     100,
     3
   );
 
   centerText(
     display2,
-    "45 MIN",
-    160,
-    2
+    "SESSION",
+    165,
+    1
   );
 
 
@@ -930,28 +907,28 @@ void drawTasks() {
   centerText(
     display3,
     "SELECT",
-    70,
+    65,
     2
   );
 
   centerText(
     display3,
     "TO START",
-    120,
+    110,
     2
   );
 
   centerText(
     display3,
     "TIMER",
-    170,
+    160,
     1
   );
 }
 
 
 // ============================================================
-// TIMER
+// TIMER SCREEN
 // ============================================================
 
 void drawTimer() {
@@ -970,19 +947,37 @@ void drawTimer() {
   centerText(
     display1,
     "STUDY",
-    40,
+    50,
     2
   );
 
   centerText(
     display1,
     "SESSION",
-    100,
+    105,
     2
   );
 
 
   // DISPLAY 2
+
+  updateTimerValue();
+
+
+  // DISPLAY 3
+
+  updateTimerStatus();
+
+
+  lastTimerDisplay = millis();
+}
+
+
+// ============================================================
+// TIMER VALUE
+// ============================================================
+
+void updateTimerValue() {
 
   unsigned long minutes =
     elapsedSeconds / 60;
@@ -991,25 +986,26 @@ void drawTimer() {
     elapsedSeconds % 60;
 
 
-  char timerString[10];
+  char timerText[10];
 
   sprintf(
-    timerString,
+    timerText,
     "%02lu:%02lu",
     minutes,
     seconds
   );
 
 
+  display2.fillScreen(TFT_BLACK);
+
+  display2.setTextColor(TFT_WHITE);
+
   centerText(
     display2,
-    timerString,
-    85,
+    timerText,
+    80,
     4
   );
-
-
-  drawTimerStatus();
 }
 
 
@@ -1017,30 +1013,33 @@ void drawTimer() {
 // TIMER STATUS
 // ============================================================
 
-void drawTimerStatus() {
+void updateTimerStatus() {
+
+  display3.fillScreen(TFT_BLACK);
 
   display3.setTextColor(TFT_WHITE);
+
 
   if (timerRunning) {
 
     centerText(
       display3,
       "RUNNING",
-      60,
+      55,
       2
     );
 
     centerText(
       display3,
       "SELECT",
-      120,
+      115,
       1
     );
 
     centerText(
       display3,
       "TO PAUSE",
-      155,
+      150,
       1
     );
 
@@ -1049,21 +1048,21 @@ void drawTimerStatus() {
     centerText(
       display3,
       "PAUSED",
-      60,
+      55,
       2
     );
 
     centerText(
       display3,
       "SELECT",
-      120,
+      115,
       1
     );
 
     centerText(
       display3,
-      "TO RESUME",
-      155,
+      "TO START",
+      150,
       1
     );
   }
@@ -1071,57 +1070,14 @@ void drawTimerStatus() {
 
 
 // ============================================================
-// UPDATE TIMER DISPLAY
+// TIMER DISPLAY UPDATE
 // ============================================================
 
 void updateTimerDisplay() {
 
-  unsigned long minutes =
-    elapsedSeconds / 60;
+  updateTimerValue();
 
-  unsigned long seconds =
-    elapsedSeconds % 60;
-
-
-  char timerString[10];
-
-  sprintf(
-    timerString,
-    "%02lu:%02lu",
-    minutes,
-    seconds
-  );
-
-
-  display2.fillRect(
-    0,
-    75,
-    240,
-    55,
-    TFT_BLACK
-  );
-
-
-  display2.setTextColor(TFT_WHITE);
-
-  centerText(
-    display2,
-    timerString,
-    85,
-    4
-  );
-
-
-  display3.fillRect(
-    0,
-    45,
-    240,
-    130,
-    TFT_BLACK
-  );
-
-
-  drawTimerStatus();
+  updateTimerStatus();
 }
 
 
@@ -1145,7 +1101,7 @@ void drawSettings() {
   centerText(
     display1,
     "SETTINGS",
-    40,
+    45,
     2
   );
 
@@ -1159,7 +1115,7 @@ void drawSettings() {
   centerText(
     display1,
     "HELPER",
-    140,
+    145,
     2
   );
 
