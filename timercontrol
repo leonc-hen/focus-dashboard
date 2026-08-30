@@ -1,0 +1,1433 @@
+#define LGFX_USE_V1
+
+#include <LovyanGFX.hpp>
+#include <Wire.h>
+#include <RTClib.h>
+
+// ============================================================
+// DISPLAY CLASS
+// ============================================================
+
+class LGFX : public lgfx::LGFX_Device {
+
+  lgfx::Panel_GC9A01 panel;
+  lgfx::Bus_SPI bus;
+
+public:
+
+  LGFX(int8_t cs, int8_t dc, int8_t rst) {
+
+    auto busConfig = bus.config();
+
+    busConfig.spi_host = SPI2_HOST;
+    busConfig.freq_write = 40000000;
+
+    busConfig.pin_sclk = 12;
+    busConfig.pin_mosi = 11;
+    busConfig.pin_miso = -1;
+    busConfig.pin_dc = dc;
+
+    bus.config(busConfig);
+    panel.setBus(&bus);
+
+    auto panelConfig = panel.config();
+
+    panelConfig.pin_cs = cs;
+    panelConfig.pin_rst = rst;
+    panelConfig.pin_busy = -1;
+
+    panelConfig.memory_width = 240;
+    panelConfig.memory_height = 240;
+
+    panelConfig.panel_width = 240;
+    panelConfig.panel_height = 240;
+
+    panelConfig.offset_x = 0;
+    panelConfig.offset_y = 0;
+
+    panelConfig.invert = true;
+    panelConfig.rgb_order = false;
+    panelConfig.dlen_16bit = false;
+
+    panelConfig.bus_shared = true;
+
+    panel.config(panelConfig);
+
+    setPanel(&panel);
+  }
+};
+
+
+// ============================================================
+// DISPLAYS
+// ============================================================
+
+LGFX display1(10, 5, 4);
+LGFX display2(9, 6, 7);
+LGFX display3(8, 13, 14);
+
+
+// ============================================================
+// RTC
+// ============================================================
+
+RTC_DS3231 rtc;
+
+
+// ============================================================
+// BUTTON PINS
+// ============================================================
+
+const int BUTTON_PREVIOUS = 15;
+const int BUTTON_NEXT     = 16;
+const int BUTTON_SELECT   = 1;
+const int BUTTON_BACK     = 2;
+
+
+// ============================================================
+// DEBOUNCE
+// ============================================================
+
+const unsigned long DEBOUNCE_MS = 50;
+
+
+// ============================================================
+// BUTTON CLASS
+// ============================================================
+
+class DebouncedButton {
+
+private:
+
+  int pin;
+
+  bool currentState;
+  bool lastReading;
+
+  unsigned long lastChangeTime;
+
+public:
+
+  DebouncedButton(int gpio) {
+
+    pin = gpio;
+
+    currentState = HIGH;
+    lastReading = HIGH;
+
+    lastChangeTime = 0;
+  }
+
+
+  void begin() {
+
+    pinMode(pin, INPUT_PULLUP);
+
+    currentState = digitalRead(pin);
+    lastReading = currentState;
+
+    lastChangeTime = millis();
+  }
+
+
+  bool pressed() {
+
+    bool reading = digitalRead(pin);
+
+
+    // Raw signal changed
+
+    if (reading != lastReading) {
+
+      lastReading = reading;
+
+      lastChangeTime = millis();
+    }
+
+
+    // Signal has remained stable
+
+    if (
+      millis() - lastChangeTime >= DEBOUNCE_MS &&
+      reading != currentState
+    ) {
+
+      currentState = reading;
+
+
+      // INPUT_PULLUP:
+      // LOW = button pressed
+
+      if (currentState == LOW) {
+
+        return true;
+      }
+    }
+
+    return false;
+  }
+};
+
+
+// ============================================================
+// BUTTON OBJECTS
+// ============================================================
+
+DebouncedButton buttonPrevious(BUTTON_PREVIOUS);
+DebouncedButton buttonNext(BUTTON_NEXT);
+DebouncedButton buttonSelect(BUTTON_SELECT);
+DebouncedButton buttonBack(BUTTON_BACK);
+
+
+// ============================================================
+// SCREEN STATES
+// ============================================================
+
+enum Screen {
+
+  HOME,
+  TASKS,
+  TIMER
+};
+
+Screen currentScreen = HOME;
+
+
+// ============================================================
+// TASKS
+// ============================================================
+
+const int NUM_TASKS = 3;
+
+const char* tasks[NUM_TASKS] = {
+
+  "PHYSICS",
+  "CHEMISTRY",
+  "MATH"
+};
+
+
+// Highlighted task
+
+int selectedTask = 0;
+
+
+// Currently active task
+
+int activeTask = 0;
+
+
+// ============================================================
+// TIMER DURATIONS
+// ============================================================
+
+// Available study durations in minutes
+
+const int NUM_DURATIONS = 6;
+
+const int durations[NUM_DURATIONS] = {
+
+  15,
+  25,
+  30,
+  45,
+  60,
+  90
+};
+
+
+// Currently selected duration
+
+int selectedDuration = 1;
+
+
+// Total duration of active timer
+
+unsigned long timerDurationSeconds = 25UL * 60UL;
+
+
+// Remaining time
+
+unsigned long remainingSeconds = 25UL * 60UL;
+
+
+// Timer state
+
+bool timerRunning = false;
+
+
+// Used to calculate countdown
+
+unsigned long timerStartMillis = 0;
+
+
+// Used for display refresh
+
+unsigned long lastTimerDisplay = 0;
+
+
+// ============================================================
+// CLOCK
+// ============================================================
+
+unsigned long lastClockDisplay = 0;
+
+
+// ============================================================
+// CENTER TEXT
+// ============================================================
+
+void centerText(
+  LGFX &display,
+  const char *text,
+  int y,
+  int size
+) {
+
+  display.setTextSize(size);
+
+  int width = display.textWidth(text);
+
+  int x = (240 - width) / 2;
+
+  display.setCursor(x, y);
+
+  display.print(text);
+}
+
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  delay(200);
+
+
+  // ----------------------------------------------------------
+  // BUTTONS
+  // ----------------------------------------------------------
+
+  buttonPrevious.begin();
+  buttonNext.begin();
+  buttonSelect.begin();
+  buttonBack.begin();
+
+
+  // ----------------------------------------------------------
+  // RTC
+  // ----------------------------------------------------------
+
+  Wire.begin(17, 18);
+
+  if (!rtc.begin()) {
+
+    Serial.println("RTC NOT FOUND");
+
+  } else {
+
+    Serial.println("RTC CONNECTED");
+
+    if (rtc.lostPower()) {
+
+      Serial.println("RTC LOST POWER");
+
+      rtc.adjust(
+        DateTime(F(__DATE__), F(__TIME__))
+      );
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 1
+  // ----------------------------------------------------------
+
+  display1.init();
+  display1.setRotation(0);
+  display1.fillScreen(TFT_BLACK);
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 2
+  // ----------------------------------------------------------
+
+  display2.init();
+  display2.setRotation(0);
+  display2.fillScreen(TFT_BLACK);
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 3
+  // ----------------------------------------------------------
+
+  display3.init();
+  display3.setRotation(0);
+  display3.fillScreen(TFT_BLACK);
+
+
+  // ----------------------------------------------------------
+  // INITIAL SCREEN
+  // ----------------------------------------------------------
+
+  drawHome();
+
+
+  Serial.println();
+  Serial.println("==============================");
+  Serial.println("STUDY HELPER READY");
+  Serial.println("==============================");
+
+  Serial.println("Button 1 = Previous");
+  Serial.println("Button 2 = Next");
+  Serial.println("Button 3 = Select");
+  Serial.println("Button 4 = Back");
+}
+
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+
+void loop() {
+
+  // ==========================================================
+  // BUTTON 1
+  // ==========================================================
+
+  if (buttonPrevious.pressed()) {
+
+    Serial.println("BUTTON 1");
+
+    handlePrevious();
+  }
+
+
+  // ==========================================================
+  // BUTTON 2
+  // ==========================================================
+
+  if (buttonNext.pressed()) {
+
+    Serial.println("BUTTON 2");
+
+    handleNext();
+  }
+
+
+  // ==========================================================
+  // BUTTON 3
+  // ==========================================================
+
+  if (buttonSelect.pressed()) {
+
+    Serial.println("BUTTON 3");
+
+    handleSelect();
+  }
+
+
+  // ==========================================================
+  // BUTTON 4
+  // ==========================================================
+
+  if (buttonBack.pressed()) {
+
+    Serial.println("BUTTON 4");
+
+    handleBack();
+  }
+
+
+  // ==========================================================
+  // TIMER
+  // ==========================================================
+
+  updateTimer();
+
+
+  // ==========================================================
+  // HOME CLOCK
+  // ==========================================================
+
+  if (
+    currentScreen == HOME &&
+    millis() - lastClockDisplay >= 1000
+  ) {
+
+    lastClockDisplay = millis();
+
+    updateHomeTime();
+  }
+
+
+  // ==========================================================
+  // TIMER DISPLAY
+  // ==========================================================
+
+  if (
+    currentScreen == TIMER &&
+    millis() - lastTimerDisplay >= 500
+  ) {
+
+    lastTimerDisplay = millis();
+
+    updateTimerDisplay();
+  }
+}
+
+
+// ============================================================
+// BUTTON 1
+// PREVIOUS
+// ============================================================
+
+void handlePrevious() {
+
+  switch (currentScreen) {
+
+    // --------------------------------------------------------
+    // HOME
+    // --------------------------------------------------------
+
+    case HOME:
+
+      currentScreen = TASKS;
+
+      drawTasks();
+
+      break;
+
+
+    // --------------------------------------------------------
+    // TASKS
+    // --------------------------------------------------------
+
+    case TASKS:
+
+      selectedTask--;
+
+      if (selectedTask < 0) {
+
+        selectedTask = NUM_TASKS - 1;
+      }
+
+      drawTasks();
+
+      break;
+
+
+    // --------------------------------------------------------
+    // TIMER
+    // --------------------------------------------------------
+
+    case TIMER:
+
+      // Don't change duration while timer is running
+
+      if (!timerRunning) {
+
+        selectedDuration--;
+
+        if (selectedDuration < 0) {
+
+          selectedDuration = NUM_DURATIONS - 1;
+        }
+
+        updateSelectedDuration();
+
+        drawTimer();
+      }
+
+      break;
+  }
+}
+
+
+// ============================================================
+// BUTTON 2
+// NEXT
+// ============================================================
+
+void handleNext() {
+
+  switch (currentScreen) {
+
+    // --------------------------------------------------------
+    // HOME
+    // --------------------------------------------------------
+
+    case HOME:
+
+      currentScreen = TASKS;
+
+      drawTasks();
+
+      break;
+
+
+    // --------------------------------------------------------
+    // TASKS
+    // --------------------------------------------------------
+
+    case TASKS:
+
+      selectedTask++;
+
+      if (selectedTask >= NUM_TASKS) {
+
+        selectedTask = 0;
+      }
+
+      drawTasks();
+
+      break;
+
+
+    // --------------------------------------------------------
+    // TIMER
+    // --------------------------------------------------------
+
+    case TIMER:
+
+      // Don't change duration while running
+
+      if (!timerRunning) {
+
+        selectedDuration++;
+
+        if (selectedDuration >= NUM_DURATIONS) {
+
+          selectedDuration = 0;
+        }
+
+        updateSelectedDuration();
+
+        drawTimer();
+      }
+
+      break;
+  }
+}
+
+
+// ============================================================
+// BUTTON 3
+// SELECT
+// ============================================================
+
+void handleSelect() {
+
+  switch (currentScreen) {
+
+    // --------------------------------------------------------
+    // HOME
+    // --------------------------------------------------------
+
+    case HOME:
+
+      currentScreen = TASKS;
+
+      drawTasks();
+
+      break;
+
+
+    // --------------------------------------------------------
+    // TASKS
+    // --------------------------------------------------------
+
+    case TASKS:
+
+      activeTask = selectedTask;
+
+      Serial.print("Selected task: ");
+      Serial.println(tasks[activeTask]);
+
+
+      // Start with selected duration
+
+      updateSelectedDuration();
+
+
+      timerRunning = false;
+
+      currentScreen = TIMER;
+
+      drawTimer();
+
+      break;
+
+
+    // --------------------------------------------------------
+    // TIMER
+    // --------------------------------------------------------
+
+    case TIMER:
+
+      if (timerRunning) {
+
+        // ----------------------------------------------
+        // PAUSE
+        // ----------------------------------------------
+
+        updateTimer();
+
+        timerRunning = false;
+
+        Serial.println("TIMER PAUSED");
+
+      } else {
+
+        // ----------------------------------------------
+        // START / RESUME
+        // ----------------------------------------------
+
+        if (remainingSeconds == 0) {
+
+          remainingSeconds = timerDurationSeconds;
+        }
+
+
+        timerStartMillis =
+          millis();
+
+        timerRunning = true;
+
+        Serial.println("TIMER STARTED");
+      }
+
+
+      drawTimer();
+
+      break;
+  }
+}
+
+
+// ============================================================
+// BUTTON 4
+// BACK
+// ============================================================
+
+void handleBack() {
+
+  switch (currentScreen) {
+
+    // --------------------------------------------------------
+    // HOME
+    // --------------------------------------------------------
+
+    case HOME:
+
+      break;
+
+
+    // --------------------------------------------------------
+    // TASKS
+    // --------------------------------------------------------
+
+    case TASKS:
+
+      currentScreen = HOME;
+
+      drawHome();
+
+      break;
+
+
+    // --------------------------------------------------------
+    // TIMER
+    // --------------------------------------------------------
+
+    case TIMER:
+
+      // Stop timer
+
+      timerRunning = false;
+
+      remainingSeconds = timerDurationSeconds;
+
+
+      currentScreen = TASKS;
+
+      drawTasks();
+
+      break;
+  }
+}
+
+
+// ============================================================
+// UPDATE SELECTED DURATION
+// ============================================================
+
+void updateSelectedDuration() {
+
+  timerDurationSeconds =
+    (unsigned long)durations[selectedDuration] * 60UL;
+
+  remainingSeconds =
+    timerDurationSeconds;
+
+
+  Serial.print("Timer duration: ");
+
+  Serial.print(durations[selectedDuration]);
+
+  Serial.println(" minutes");
+}
+
+
+// ============================================================
+// TIMER UPDATE
+// ============================================================
+
+void updateTimer() {
+
+  if (!timerRunning) {
+
+    return;
+  }
+
+
+  unsigned long elapsedMillis =
+    millis() - timerStartMillis;
+
+
+  unsigned long elapsedSeconds =
+    elapsedMillis / 1000;
+
+
+  // ----------------------------------------------------------
+  // TIMER FINISHED
+  // ----------------------------------------------------------
+
+  if (elapsedSeconds >= remainingSeconds) {
+
+    remainingSeconds = 0;
+
+    timerRunning = false;
+
+    Serial.println("TIMER FINISHED");
+
+    drawTimer();
+
+    return;
+  }
+
+
+  // ----------------------------------------------------------
+  // COUNTDOWN
+  // ----------------------------------------------------------
+
+  unsigned long originalRemaining =
+    remainingSeconds;
+
+
+  // We store the remaining time by calculating from
+  // the starting value.
+
+  remainingSeconds =
+    timerDurationSeconds - elapsedSeconds;
+
+
+  // Prevent underflow
+
+  if (remainingSeconds > originalRemaining) {
+
+    remainingSeconds = 0;
+  }
+}
+
+
+// ============================================================
+// HOME SCREEN
+// ============================================================
+
+void drawHome() {
+
+  DateTime now = rtc.now();
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 1
+  // ----------------------------------------------------------
+
+  display1.fillScreen(TFT_BLACK);
+
+  display1.setTextColor(TFT_WHITE);
+
+  centerText(
+    display1,
+    "TIME",
+    35,
+    2
+  );
+
+
+  char timeText[9];
+
+  sprintf(
+    timeText,
+    "%02d:%02d:%02d",
+    now.hour(),
+    now.minute(),
+    now.second()
+  );
+
+
+  centerText(
+    display1,
+    timeText,
+    95,
+    3
+  );
+
+
+  centerText(
+    display1,
+    "HOME",
+    180,
+    1
+  );
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 2
+  // ----------------------------------------------------------
+
+  display2.fillScreen(TFT_BLACK);
+
+  display2.setTextColor(TFT_WHITE);
+
+  centerText(
+    display2,
+    "NEXT TASK",
+    35,
+    2
+  );
+
+
+  centerText(
+    display2,
+    tasks[selectedTask],
+    95,
+    3
+  );
+
+
+  centerText(
+    display2,
+    "SELECT FOR TASKS",
+    170,
+    1
+  );
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 3
+  // ----------------------------------------------------------
+
+  display3.fillScreen(TFT_BLACK);
+
+  display3.setTextColor(TFT_WHITE);
+
+  centerText(
+    display3,
+    "STUDY HELPER",
+    35,
+    2
+  );
+
+  centerText(
+    display3,
+    "READY",
+    100,
+    3
+  );
+
+  centerText(
+    display3,
+    "BUTTON 3 = SELECT",
+    170,
+    1
+  );
+}
+
+
+// ============================================================
+// UPDATE HOME TIME
+// ============================================================
+
+void updateHomeTime() {
+
+  DateTime now = rtc.now();
+
+
+  display1.fillRect(
+    0,
+    85,
+    240,
+    60,
+    TFT_BLACK
+  );
+
+
+  char timeText[9];
+
+  sprintf(
+    timeText,
+    "%02d:%02d:%02d",
+    now.hour(),
+    now.minute(),
+    now.second()
+  );
+
+
+  display1.setTextColor(TFT_WHITE);
+
+  centerText(
+    display1,
+    timeText,
+    95,
+    3
+  );
+}
+
+
+// ============================================================
+// TASK SCREEN
+// ============================================================
+
+void drawTasks() {
+
+  display1.fillScreen(TFT_BLACK);
+  display2.fillScreen(TFT_BLACK);
+  display3.fillScreen(TFT_BLACK);
+
+  display1.setTextColor(TFT_WHITE);
+  display2.setTextColor(TFT_WHITE);
+  display3.setTextColor(TFT_WHITE);
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 1
+  // ----------------------------------------------------------
+
+  centerText(
+    display1,
+    "TASKS",
+    25,
+    2
+  );
+
+
+  centerText(
+    display1,
+    tasks[selectedTask],
+    85,
+    3
+  );
+
+
+  char positionText[10];
+
+  sprintf(
+    positionText,
+    "%d / %d",
+    selectedTask + 1,
+    NUM_TASKS
+  );
+
+
+  centerText(
+    display1,
+    positionText,
+    145,
+    2
+  );
+
+
+  centerText(
+    display1,
+    "SELECT",
+    190,
+    1
+  );
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 2
+  // ----------------------------------------------------------
+
+  centerText(
+    display2,
+    "AVAILABLE",
+    30,
+    2
+  );
+
+
+  for (int i = 0; i < NUM_TASKS; i++) {
+
+    char line[30];
+
+
+    if (i == selectedTask) {
+
+      sprintf(
+        line,
+        "> %s",
+        tasks[i]
+      );
+
+    } else {
+
+      sprintf(
+        line,
+        "  %s",
+        tasks[i]
+      );
+    }
+
+
+    display2.setTextSize(2);
+
+    int width =
+      display2.textWidth(line);
+
+    int x =
+      (240 - width) / 2;
+
+
+    display2.setCursor(
+      x,
+      75 + i * 45
+    );
+
+    display2.print(line);
+  }
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 3
+  // ----------------------------------------------------------
+
+  centerText(
+    display3,
+    "BUTTON 1",
+    35,
+    1
+  );
+
+  centerText(
+    display3,
+    "PREVIOUS",
+    60,
+    1
+  );
+
+
+  centerText(
+    display3,
+    "BUTTON 2",
+    100,
+    1
+  );
+
+  centerText(
+    display3,
+    "NEXT",
+    125,
+    1
+  );
+
+
+  centerText(
+    display3,
+    "BUTTON 3 = SELECT",
+    175,
+    1
+  );
+
+
+  centerText(
+    display3,
+    "BUTTON 4 = BACK",
+    200,
+    1
+  );
+}
+
+
+// ============================================================
+// TIMER SCREEN
+// ============================================================
+
+void drawTimer() {
+
+  display1.fillScreen(TFT_BLACK);
+  display2.fillScreen(TFT_BLACK);
+  display3.fillScreen(TFT_BLACK);
+
+  display1.setTextColor(TFT_WHITE);
+  display2.setTextColor(TFT_WHITE);
+  display3.setTextColor(TFT_WHITE);
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 1
+  // ----------------------------------------------------------
+
+  centerText(
+    display1,
+    "STUDY TIMER",
+    30,
+    2
+  );
+
+
+  centerText(
+    display1,
+    tasks[activeTask],
+    90,
+    3
+  );
+
+
+  if (!timerRunning) {
+
+    centerText(
+      display1,
+      "SET TIME",
+      155,
+      1
+    );
+
+  } else {
+
+    centerText(
+      display1,
+      "RUNNING",
+      155,
+      1
+    );
+  }
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 2
+  // ----------------------------------------------------------
+
+  updateTimerValue();
+
+
+  // ----------------------------------------------------------
+  // DISPLAY 3
+  // ----------------------------------------------------------
+
+  updateTimerStatus();
+
+
+  lastTimerDisplay = millis();
+}
+
+
+// ============================================================
+// TIMER VALUE
+// ============================================================
+
+void updateTimerValue() {
+
+  unsigned long minutes =
+    remainingSeconds / 60;
+
+  unsigned long seconds =
+    remainingSeconds % 60;
+
+
+  char timerText[10];
+
+  sprintf(
+    timerText,
+    "%02lu:%02lu",
+    minutes,
+    seconds
+  );
+
+
+  display2.fillScreen(TFT_BLACK);
+
+  display2.setTextColor(TFT_WHITE);
+
+
+  centerText(
+    display2,
+    timerText,
+    75,
+    4
+  );
+
+
+  // ----------------------------------------------------------
+  // Selected duration
+  // ----------------------------------------------------------
+
+  char durationText[20];
+
+  sprintf(
+    durationText,
+    "%d MIN",
+    durations[selectedDuration]
+  );
+
+
+  centerText(
+    display2,
+    durationText,
+    145,
+    2
+  );
+}
+
+
+// ============================================================
+// TIMER STATUS
+// ============================================================
+
+void updateTimerStatus() {
+
+  display3.fillScreen(TFT_BLACK);
+
+  display3.setTextColor(TFT_WHITE);
+
+
+  // ----------------------------------------------------------
+  // TIMER RUNNING
+  // ----------------------------------------------------------
+
+  if (timerRunning) {
+
+    centerText(
+      display3,
+      "RUNNING",
+      45,
+      2
+    );
+
+
+    centerText(
+      display3,
+      "SELECT",
+      100,
+      1
+    );
+
+
+    centerText(
+      display3,
+      "PAUSE / RESUME",
+      125,
+      1
+    );
+
+
+    centerText(
+      display3,
+      "BACK = RESET",
+      175,
+      1
+    );
+
+
+    return;
+  }
+
+
+  // ----------------------------------------------------------
+  // TIMER FINISHED
+  // ----------------------------------------------------------
+
+  if (remainingSeconds == 0) {
+
+    centerText(
+      display3,
+      "COMPLETE!",
+      50,
+      2
+    );
+
+
+    centerText(
+      display3,
+      "SELECT = RESTART",
+      115,
+      1
+    );
+
+
+    centerText(
+      display3,
+      "BACK = TASKS",
+      170,
+      1
+    );
+
+
+    return;
+  }
+
+
+  // ----------------------------------------------------------
+  // TIMER READY / PAUSED
+  // ----------------------------------------------------------
+
+  centerText(
+    display3,
+    "READY",
+    45,
+    2
+  );
+
+
+  centerText(
+    display3,
+    "SELECT = START",
+    105,
+    1
+  );
+
+
+  centerText(
+    display3,
+    "1 / 2 = CHANGE",
+    145,
+    1
+  );
+
+
+  centerText(
+    display3,
+    "BACK = TASKS",
+    185,
+    1
+  );
+}
+
+
+// ============================================================
+// TIMER DISPLAY UPDATE
+// ============================================================
+
+void updateTimerDisplay() {
+
+  updateTimer();
+
+  updateTimerValue();
+
+  updateTimerStatus();
+}
